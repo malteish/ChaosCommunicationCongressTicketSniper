@@ -1,7 +1,10 @@
 function avgn(array, n) {
-	let sorted = array.sort();
+	// Fix 1: Sort numerically, not as strings
+	// Fix 2: Don't mutate the original array
+	let sorted = [...array].sort((a, b) => a - b);
 	let len = Math.min(array.length, n)
-	return sorted.slice(0, n).reduce((a, b) => a + b) / len;
+	// Fix 3: Use len consistently
+	return sorted.slice(0, len).reduce((a, b) => a + b) / len;
 }
 
 const now = Date.now();
@@ -12,6 +15,7 @@ console.log("Now:", new Date(now))
 // To test that reloading really works, you can inject a date here.
 const sales = [
 	new Date("2025-11-08T11:00+01:00"),
+	new Date("2025-11-17T15:10+01:00"),
 	new Date("2025-11-17T20:00+01:00"),
 ]
 
@@ -67,7 +71,7 @@ measure.id = setInterval(
 
 		let ours = Date.now();
 		let response = await fetch(
-			url, 
+			url,
 			{
 				cache: "no-store",
 				method: "head",
@@ -79,16 +83,17 @@ measure.id = setInterval(
 		let header = response.headers.get("date");
 		if (header !== null) {
 			let theirs = Date.parse(header);
-			//console.log("Theirs:", theirs)
+			console.log("Theirs:", theirs)
 
 			let offset = theirs - ours;
-			//console.log("Offset", offset);
+			console.log("Current Offset", offset);
 
 			measure.offsets.push(offset);
 			measure.offset = avgn(measure.offsets, 5);
+			console.log("All offsets:", measure.offsets);
 			console.log("Avg. Offset", measure.offset);
 
-			console.log((performance.now() - (trigger - measure.offset)) / 1000)
+			//console.log((performance.now() - (trigger - measure.offset)) / 1000)
 		}
 	},
 	measure.interval /* [ms] … Measuring interval. */,
@@ -99,7 +104,7 @@ const handle = sale === undefined
 		if (performance.now() > trigger - measure.offset/* + measure.roundtrip*/) {
 			window.clearInterval(reloader);
 			let response = await fetch(
-				url, 
+				url,
 				{
 					cache: "no-store",
 					method: "head",
@@ -110,7 +115,8 @@ const handle = sale === undefined
 			console.assert(header !== null)
 
 			let theirs = Date.parse(header);
-			delta = theirs - target;
+			// Fix 4: Declare variable properly (was missing 'let')
+			let delta = theirs - target;
 			console.log("Delta:", delta)
 		}
 	}
