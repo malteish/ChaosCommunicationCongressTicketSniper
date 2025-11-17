@@ -34,6 +34,7 @@ let measure = {
 	offsets: [],
 	lastServerSecond: null,
 	edgeMeasurements: [],
+	learnedPhase: null, // Where in our local second the server's second occurs
 	id: undefined,
 	interval: 5000,
 	burstStartOffset: 50, // Start 50ms before predicted edge, will adapt
@@ -176,13 +177,21 @@ async function initialSync() {
 		// Use the best (smallest absolute value) edge measurements
 		let rawOffset = avgn(measure.edgeMeasurements, Math.min(5, measure.edgeMeasurements.length));
 
+		// Store the learned phase - this is where in our local second the server's second occurs
+		// predictedPhase was refined throughout the detection process
+		measure.learnedPhase = predictedPhase;
+
 		// Add a safety buffer to ensure we're slightly late, not early
 		// Being 50-100ms late is MUCH better than being any amount early!
 		const SAFETY_BUFFER = 75; // ms - ensures we trigger AFTER sale starts
-		measure.offset = rawOffset - SAFETY_BUFFER;
+
+		// Calculate when to trigger based on the learned phase
+		// If server's :00.000 occurs at our local :00.180, we should trigger at local phase 180ms + buffer
+		measure.offset = -Math.abs(rawOffset) - SAFETY_BUFFER;
 
 		console.log("✓ Initial sync complete!");
 		console.log("Edge measurements:", measure.edgeMeasurements);
+		console.log("Learned phase:", measure.learnedPhase, "ms (server second occurs at this local phase)");
 		console.log("Raw offset:", rawOffset, "ms");
 		console.log("Safety buffer:", SAFETY_BUFFER, "ms");
 		console.log("Final offset (with safety buffer):", measure.offset, "ms");
@@ -215,7 +224,7 @@ function startPeriodicMeasurements(predictedPhase) {
 
 				// Apply safety buffer to ensure we're slightly late, not early
 				const SAFETY_BUFFER = 75; // ms
-				measure.offset = rawOffset - SAFETY_BUFFER;
+				measure.offset = -Math.abs(rawOffset) - SAFETY_BUFFER;
 
 				// Continue refining phase prediction
 				if (predictedPhase !== null) {
@@ -243,37 +252,61 @@ function startPeriodicMeasurements(predictedPhase) {
 
 const handle = sale === undefined
 	? async () => {
-		if (performance.now() > trigger - measure.offset) {
-			window.clearInterval(reloader);
-			let response = await fetch(
-				url,
-				{
-					cache: "no-store",
-					method: "head",
+		// Check if we should trigger based on learned phase
+		// When target is 14:00:00.000 and server's :00.000 occurs at our local :00.180,
+		// we should trigger when our local clock reaches 14:00:00.180 + safety buffer
+		const currentLocalPhase = Date.now() % 1000;
+		const targetSecond = Math.floor(target.getTime() / 1000) * 1000;
+		const currentSecond = Math.floor(Date.now() / 1000) * 1000;
+
+		// Are we in or past the target second?
+		if (currentSecond >= targetSecond) {
+			// In target second - check if we've reached the learned phase + buffer
+			const SAFETY_BUFFER = 75;
+			const triggerPhase = (measure.learnedPhase + SAFETY_BUFFER) % 1000;
+
+			if (currentLocalPhase >= triggerPhase || currentSecond > targetSecond) {
+				window.clearInterval(reloader);
+				let response = await fetch(
+					url,
+					{
+						cache: "no-store",
+						method: "head",
+					}
+				);
+
+				let header = response.headers.get("date");
+				console.assert(header !== null)
+
+				let theirs = Date.parse(header);
+				let delta = theirs - target;
+				console.log("=================================");
+				console.log("FINAL ACCURACY TEST");
+				if (delta >= 0 && delta < 1000) {
+					console.log("✓ Hit the right second!");
+				} else if (delta < 0) {
+					console.log("✗ Too early - triggered before target second");
+				} else {
+					console.log("✗ Too late - triggered after target second");
 				}
-			);
-
-			let header = response.headers.get("date");
-			console.assert(header !== null)
-
-			let theirs = Date.parse(header);
-			let delta = theirs - target;
-			console.log("=================================");
-			console.log("FINAL ACCURACY TEST");
-			if (delta >= 0 && delta < 1000) {
-				console.log("✓ Hit the right second!");
-			} else if (delta < 0) {
-				console.log("✗ Too early - triggered before target second");
-			} else {
-				console.log("✗ Too late - triggered after target second");
+				console.log("=================================")
 			}
-			console.log("=================================")
 		}
 	}
 	: () => {
-		if (performance.now() > trigger - measure.offset) {
-			window.location.reload();
-			window.clearInterval(reloader);
+		// Same logic for production mode
+		const currentLocalPhase = Date.now() % 1000;
+		const targetSecond = Math.floor(target.getTime() / 1000) * 1000;
+		const currentSecond = Math.floor(Date.now() / 1000) * 1000;
+
+		if (currentSecond >= targetSecond) {
+			const SAFETY_BUFFER = 75;
+			const triggerPhase = (measure.learnedPhase + SAFETY_BUFFER) % 1000;
+
+			if (currentLocalPhase >= triggerPhase || currentSecond > targetSecond) {
+				window.location.reload();
+				window.clearInterval(reloader);
+			}
 		}
 	}
 
