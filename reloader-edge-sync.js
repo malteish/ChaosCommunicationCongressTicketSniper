@@ -36,17 +36,21 @@ let measure = {
 	edgeMeasurements: [],
 	id: undefined,
 	interval: 5000,
+	burstStartOffset: 50, // Start 50ms before predicted edge, will adapt
 }
 
 // Edge detection: Detect when server second changes using burst sampling
 async function detectEdge(predictedPhase = null) {
-	console.log("🔍 Detecting second edge..." + (predictedPhase !== null ? ` (predicted phase: ${predictedPhase}ms)` : ""));
+	console.log("🔍 Detecting second edge..." + (predictedPhase !== null ? ` (predicted phase: ${predictedPhase}ms, starting ${measure.burstStartOffset}ms early)` : ""));
 
 	let previousSecond = null;
 	let attempts = 0;
 	const maxAttempts = 100;
+	let samplesBeforeEdge = 0;
 
 	// Phase 1: Initial search with moderate delays
+	let burstStarted = false;
+
 	while (attempts < maxAttempts) {
 		let ours = Date.now();
 		let response = await fetch(url, {
@@ -61,39 +65,49 @@ async function detectEdge(predictedPhase = null) {
 		}
 
 		let theirs = Date.parse(header);
+		let localPhase = ours % 1000;
 
 		// Initialize previous second on first attempt
 		if (previousSecond === null) {
 			previousSecond = theirs;
+			console.log(`    Initial check: Server=${theirs}, Local phase=${localPhase}ms`);
 
-			// If we have a predicted phase, wait until just before it
+			// If we have a predicted phase, wait until burstStartOffset before it
 			if (predictedPhase !== null) {
 				const localMs = ours % 1000;
 				let waitTime;
 
-				if (predictedPhase > localMs) {
+				if (predictedPhase > localMs + measure.burstStartOffset) {
 					// Edge is later in this second
-					waitTime = predictedPhase - localMs - 150; // Start burst 150ms before predicted edge
+					waitTime = predictedPhase - localMs - measure.burstStartOffset;
 				} else {
 					// Edge is in the next second
-					waitTime = (1000 - localMs) + predictedPhase - 150;
+					waitTime = (1000 - localMs) + predictedPhase - measure.burstStartOffset;
 				}
 
 				if (waitTime > 0 && waitTime < 900) {
-					console.log(`⏭️  Waiting ${waitTime}ms to approach predicted edge...`);
+					console.log(`⏭️  Waiting ${waitTime}ms to start burst...`);
 					await new Promise(resolve => setTimeout(resolve, waitTime));
 					continue;
 				}
 			}
+		} else {
+			// We're in burst mode - log each attempt
+			if (!burstStarted) {
+				console.log(`💥 Burst sampling started!`);
+				burstStarted = true;
+			}
+			console.log(`    Burst attempt #${attempts}: Server=${theirs}, Local phase=${localPhase}ms, Server still at ${previousSecond}`);
+			samplesBeforeEdge++;
 		}
 
 		// Check if we crossed a second boundary
 		if (theirs !== previousSecond) {
 			// We detected an edge! The server second just changed
 			let offset = theirs - ours;
-			let localPhase = ours % 1000; // Where in our local second did the edge occur?
-			console.log(`✓ Edge detected! Server: ${theirs}, Ours: ${ours}, Offset: ${offset}ms, Local phase: ${localPhase}ms`);
-			return { offset, localPhase };
+			console.log(`✓ Edge detected! Server jumped to ${theirs}, Local phase=${localPhase}ms, Offset=${offset}ms`);
+			console.log(`   Got ${samplesBeforeEdge} samples before edge`);
+			return { offset, localPhase, samplesBeforeEdge };
 		}
 
 		attempts++;
@@ -101,7 +115,8 @@ async function detectEdge(predictedPhase = null) {
 		// Phase 2: Once we know the server second, burst sample rapidly
 		if (previousSecond !== null) {
 			// Fire rapidly to catch the edge precisely
-			await new Promise(resolve => setTimeout(resolve, 10 + Math.random() * 10)); // 10-20ms bursts
+			// Use 5-10ms intervals to get multiple samples around the edge
+			await new Promise(resolve => setTimeout(resolve, 5 + Math.random() * 5)); // 5-10ms bursts
 		} else {
 			// Initial search uses jittered delays
 			const baseDelay = 50;
@@ -119,13 +134,21 @@ async function initialSync() {
 	console.log("⏱️  Performing initial synchronization...");
 
 	let predictedPhase = null;
+	let edgeCount = 0;
 
 	// Detect multiple edges for better accuracy, using learned phase
-	for (let i = 0; i < 5; i++) {
+	for (let i = 0; i < 6; i++) { // Do 6, discard first
 		let edgeResult = await detectEdge(predictedPhase);
 		if (edgeResult !== null) {
-			measure.edgeMeasurements.push(edgeResult.offset);
-			measure.offsets.push(edgeResult.offset);
+			edgeCount++;
+
+			// Skip the first measurement (often has higher latency)
+			if (edgeCount === 1) {
+				console.log(`⏭️  Discarding first measurement (${edgeResult.offset}ms) - often has connection overhead`);
+			} else {
+				measure.edgeMeasurements.push(edgeResult.offset);
+				measure.offsets.push(edgeResult.offset);
+			}
 
 			// Learn the phase for next detection
 			if (predictedPhase === null) {
@@ -134,6 +157,17 @@ async function initialSync() {
 			} else {
 				// Refine prediction with running average
 				predictedPhase = (predictedPhase + edgeResult.localPhase) / 2;
+			}
+
+			// Adapt burst start based on whether we got samples before edge
+			if (edgeResult.samplesBeforeEdge === 0) {
+				// We missed - start earlier next time
+				measure.burstStartOffset += 30;
+				console.log(`⚠️  Missed edge! Increasing burst start to ${measure.burstStartOffset}ms before predicted phase`);
+			} else if (edgeResult.samplesBeforeEdge > 5) {
+				// We're starting too early - can optimize
+				measure.burstStartOffset = Math.max(20, measure.burstStartOffset - 10);
+				console.log(`✓ Got ${edgeResult.samplesBeforeEdge} samples before edge. Adjusting burst start to ${measure.burstStartOffset}ms`);
 			}
 		}
 	}
@@ -144,6 +178,7 @@ async function initialSync() {
 		console.log("✓ Initial sync complete!");
 		console.log("Edge measurements:", measure.edgeMeasurements);
 		console.log("Initial offset:", measure.offset, "ms");
+		console.log("Optimal burst start:", measure.burstStartOffset, "ms before predicted phase");
 	} else {
 		console.warn("⚠️  Edge detection failed, using fallback method");
 	}
@@ -173,6 +208,15 @@ function startPeriodicMeasurements(predictedPhase) {
 				// Continue refining phase prediction
 				if (predictedPhase !== null) {
 					predictedPhase = (predictedPhase * 0.8 + edgeResult.localPhase * 0.2); // Weighted average
+				}
+
+				// Continue adapting burst timing
+				if (edgeResult.samplesBeforeEdge === 0) {
+					measure.burstStartOffset += 30;
+					console.log(`⚠️  Missed edge! Increasing burst start to ${measure.burstStartOffset}ms`);
+				} else if (edgeResult.samplesBeforeEdge > 5) {
+					measure.burstStartOffset = Math.max(20, measure.burstStartOffset - 10);
+					console.log(`✓ Got ${edgeResult.samplesBeforeEdge} samples before edge. Burst start now ${measure.burstStartOffset}ms`);
 				}
 
 				console.log("All offsets:", measure.offsets);
