@@ -1,9 +1,10 @@
 function avgn(array, n) {
 	// Fix 1: Sort numerically, not as strings
 	// Fix 2: Don't mutate the original array
-	let sorted = [...array].sort((a, b) => a - b);
+	// Fix 3: Sort by absolute value to get measurements closest to zero (best measurements)
+	let sorted = [...array].sort((a, b) => Math.abs(a) - Math.abs(b));
 	let len = Math.min(array.length, n)
-	// Fix 3: Use len consistently
+	// Fix 4: Use len consistently
 	return sorted.slice(0, len).reduce((a, b) => a + b) / len;
 }
 
