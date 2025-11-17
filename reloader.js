@@ -118,7 +118,16 @@ const handle = sale === undefined
 			let theirs = Date.parse(header);
 			// Fix 4: Declare variable properly (was missing 'let')
 			let delta = theirs - target;
-			console.log("Delta:", delta)
+			console.log("=================================");
+			console.log("FINAL ACCURACY TEST");
+			if (delta >= 0 && delta < 1000) {
+				console.log("✓ Hit the right second!");
+			} else if (delta < 0) {
+				console.log("✗ Too early - triggered before target second");
+			} else {
+				console.log("✗ Too late - triggered after target second");
+			}
+			console.log("=================================")
 		}
 	}
 	: () => {

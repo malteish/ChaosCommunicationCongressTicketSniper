@@ -174,10 +174,18 @@ async function initialSync() {
 
 	if (measure.edgeMeasurements.length > 0) {
 		// Use the best (smallest absolute value) edge measurements
-		measure.offset = avgn(measure.edgeMeasurements, Math.min(5, measure.edgeMeasurements.length));
+		let rawOffset = avgn(measure.edgeMeasurements, Math.min(5, measure.edgeMeasurements.length));
+
+		// Add a safety buffer to ensure we're slightly late, not early
+		// Being 50-100ms late is MUCH better than being any amount early!
+		const SAFETY_BUFFER = 75; // ms - ensures we trigger AFTER sale starts
+		measure.offset = rawOffset - SAFETY_BUFFER;
+
 		console.log("✓ Initial sync complete!");
 		console.log("Edge measurements:", measure.edgeMeasurements);
-		console.log("Initial offset:", measure.offset, "ms");
+		console.log("Raw offset:", rawOffset, "ms");
+		console.log("Safety buffer:", SAFETY_BUFFER, "ms");
+		console.log("Final offset (with safety buffer):", measure.offset, "ms");
 		console.log("Optimal burst start:", measure.burstStartOffset, "ms before predicted phase");
 	} else {
 		console.warn("⚠️  Edge detection failed, using fallback method");
@@ -203,7 +211,11 @@ function startPeriodicMeasurements(predictedPhase) {
 
 			if (edgeResult !== null) {
 				measure.offsets.push(edgeResult.offset);
-				measure.offset = avgn(measure.offsets, 5);
+				let rawOffset = avgn(measure.offsets, 5);
+
+				// Apply safety buffer to ensure we're slightly late, not early
+				const SAFETY_BUFFER = 75; // ms
+				measure.offset = rawOffset - SAFETY_BUFFER;
 
 				// Continue refining phase prediction
 				if (predictedPhase !== null) {
@@ -220,7 +232,8 @@ function startPeriodicMeasurements(predictedPhase) {
 				}
 
 				console.log("All offsets:", measure.offsets);
-				console.log("Avg. Offset:", measure.offset, "ms");
+				console.log("Raw avg. offset:", rawOffset, "ms");
+				console.log("Final offset (with 75ms safety):", measure.offset, "ms");
 				console.log("Time to trigger:", ((trigger - measure.offset - performance.now()) / 1000).toFixed(2), "seconds");
 			}
 		},
@@ -245,7 +258,16 @@ const handle = sale === undefined
 
 			let theirs = Date.parse(header);
 			let delta = theirs - target;
-			console.log("Delta:", delta, "ms")
+			console.log("=================================");
+			console.log("FINAL ACCURACY TEST");
+			if (delta >= 0 && delta < 1000) {
+				console.log("✓ Hit the right second!");
+			} else if (delta < 0) {
+				console.log("✗ Too early - triggered before target second");
+			} else {
+				console.log("✗ Too late - triggered after target second");
+			}
+			console.log("=================================")
 		}
 	}
 	: () => {
