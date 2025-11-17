@@ -38,14 +38,15 @@ let measure = {
 	interval: 5000,
 }
 
-// Edge detection: Detect when server second changes
-async function detectEdge() {
-	console.log("🔍 Detecting second edge...");
+// Edge detection: Detect when server second changes using burst sampling
+async function detectEdge(predictedPhase = null) {
+	console.log("🔍 Detecting second edge..." + (predictedPhase !== null ? ` (predicted phase: ${predictedPhase}ms)` : ""));
 
 	let previousSecond = null;
 	let attempts = 0;
-	const maxAttempts = 50; // Try for ~5 seconds max
+	const maxAttempts = 100;
 
+	// Phase 1: Initial search with moderate delays
 	while (attempts < maxAttempts) {
 		let ours = Date.now();
 		let response = await fetch(url, {
@@ -61,23 +62,52 @@ async function detectEdge() {
 
 		let theirs = Date.parse(header);
 
-		// Check if we crossed a second boundary
-		if (previousSecond !== null && theirs !== previousSecond) {
-			// We detected an edge! The server second just changed
-			let offset = theirs - ours;
-			console.log(`✓ Edge detected! Server: ${theirs}, Ours: ${ours}, Offset: ${offset}ms`);
-			return offset;
+		// Initialize previous second on first attempt
+		if (previousSecond === null) {
+			previousSecond = theirs;
+
+			// If we have a predicted phase, wait until just before it
+			if (predictedPhase !== null) {
+				const localMs = ours % 1000;
+				let waitTime;
+
+				if (predictedPhase > localMs) {
+					// Edge is later in this second
+					waitTime = predictedPhase - localMs - 150; // Start burst 150ms before predicted edge
+				} else {
+					// Edge is in the next second
+					waitTime = (1000 - localMs) + predictedPhase - 150;
+				}
+
+				if (waitTime > 0 && waitTime < 900) {
+					console.log(`⏭️  Waiting ${waitTime}ms to approach predicted edge...`);
+					await new Promise(resolve => setTimeout(resolve, waitTime));
+					continue;
+				}
+			}
 		}
 
-		previousSecond = theirs;
+		// Check if we crossed a second boundary
+		if (theirs !== previousSecond) {
+			// We detected an edge! The server second just changed
+			let offset = theirs - ours;
+			let localPhase = ours % 1000; // Where in our local second did the edge occur?
+			console.log(`✓ Edge detected! Server: ${theirs}, Ours: ${ours}, Offset: ${offset}ms, Local phase: ${localPhase}ms`);
+			return { offset, localPhase };
+		}
+
 		attempts++;
 
-		// Wait with jitter to sample at different phases of the server's second
-		// This increases chances of catching the edge very close to the actual boundary
-		const baseDelay = 50;  // Base delay in ms
-		const jitter = Math.random() * 100;  // Random jitter 0-100ms
-		const delay = baseDelay + jitter;
-		await new Promise(resolve => setTimeout(resolve, delay));
+		// Phase 2: Once we know the server second, burst sample rapidly
+		if (previousSecond !== null) {
+			// Fire rapidly to catch the edge precisely
+			await new Promise(resolve => setTimeout(resolve, 10 + Math.random() * 10)); // 10-20ms bursts
+		} else {
+			// Initial search uses jittered delays
+			const baseDelay = 50;
+			const jitter = Math.random() * 100;
+			await new Promise(resolve => setTimeout(resolve, baseDelay + jitter));
+		}
 	}
 
 	console.warn("Could not detect edge within timeout");
@@ -88,18 +118,29 @@ async function detectEdge() {
 async function initialSync() {
 	console.log("⏱️  Performing initial synchronization...");
 
-	// Detect multiple edges for better accuracy
-	for (let i = 0; i < 3; i++) {
-		let edgeOffset = await detectEdge();
-		if (edgeOffset !== null) {
-			measure.edgeMeasurements.push(edgeOffset);
+	let predictedPhase = null;
+
+	// Detect multiple edges for better accuracy, using learned phase
+	for (let i = 0; i < 5; i++) {
+		let edgeResult = await detectEdge(predictedPhase);
+		if (edgeResult !== null) {
+			measure.edgeMeasurements.push(edgeResult.offset);
+			measure.offsets.push(edgeResult.offset);
+
+			// Learn the phase for next detection
+			if (predictedPhase === null) {
+				predictedPhase = edgeResult.localPhase;
+				console.log(`📍 Learned phase: ${predictedPhase}ms - will target next edges around this time`);
+			} else {
+				// Refine prediction with running average
+				predictedPhase = (predictedPhase + edgeResult.localPhase) / 2;
+			}
 		}
 	}
 
 	if (measure.edgeMeasurements.length > 0) {
-		// Use the best (smallest) edge measurements
-		measure.offset = avgn(measure.edgeMeasurements, Math.min(3, measure.edgeMeasurements.length));
-		measure.offsets = [...measure.edgeMeasurements];
+		// Use the best (smallest absolute value) edge measurements
+		measure.offset = avgn(measure.edgeMeasurements, Math.min(5, measure.edgeMeasurements.length));
 		console.log("✓ Initial sync complete!");
 		console.log("Edge measurements:", measure.edgeMeasurements);
 		console.log("Initial offset:", measure.offset, "ms");
@@ -107,11 +148,11 @@ async function initialSync() {
 		console.warn("⚠️  Edge detection failed, using fallback method");
 	}
 
-	// Start periodic measurements
-	startPeriodicMeasurements();
+	// Start periodic measurements with learned phase
+	startPeriodicMeasurements(predictedPhase);
 }
 
-function startPeriodicMeasurements() {
+function startPeriodicMeasurements(predictedPhase) {
 	measure.id = setInterval(
 		async () => {
 			if (performance.now() > trigger - (2 * measure.interval)) {
@@ -122,12 +163,18 @@ function startPeriodicMeasurements() {
 				return;
 			}
 
-			// Try to detect an edge
-			let edgeOffset = await detectEdge();
+			// Try to detect an edge using learned phase
+			let edgeResult = await detectEdge(predictedPhase);
 
-			if (edgeOffset !== null) {
-				measure.offsets.push(edgeOffset);
+			if (edgeResult !== null) {
+				measure.offsets.push(edgeResult.offset);
 				measure.offset = avgn(measure.offsets, 5);
+
+				// Continue refining phase prediction
+				if (predictedPhase !== null) {
+					predictedPhase = (predictedPhase * 0.8 + edgeResult.localPhase * 0.2); // Weighted average
+				}
+
 				console.log("All offsets:", measure.offsets);
 				console.log("Avg. Offset:", measure.offset, "ms");
 				console.log("Time to trigger:", ((trigger - measure.offset - performance.now()) / 1000).toFixed(2), "seconds");
